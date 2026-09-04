@@ -1,59 +1,116 @@
-# Server-Sent Events 課程（.NET 9 + 原生 JavaScript）
+# SSE 課程 - Step 4：多客戶端廣播（一對多推播）
 
-這是一個透過 Git branch 一步步學習 Server-Sent Events（SSE）的實作課程。
-後端使用 **.NET 9 Minimal API**，前端使用**原生 HTML/JavaScript（EventSource API）**，
-不依賴任何前端框架，讓你專注在 SSE 協定本身的機制。
+> 這是 [Server-Sent Events 課程](https://github.com/victortsaitw12/server-sent-events)（.NET 9 + 原生 JavaScript）的第 4 步，共 5 步。
+> 回到 [課程總覽](https://github.com/victortsaitw12/server-sent-events/blob/main/README.md) ・ 上一步：[`step-3-reconnect`](https://github.com/victortsaitw12/server-sent-events/tree/step-3-reconnect) ・ 下一步：[`step-5-heartbeat-cleanup`](https://github.com/victortsaitw12/server-sent-events/tree/step-5-heartbeat-cleanup)
 
-## 專案結構
+## 這一步要學什麼
 
+前三步的 endpoint 都只服務「一個」連線。SSE 真正常見的應用場景，是伺服器
+主動把同一則訊息**同時推送給所有正在連線的客戶端**——例如系統公告、
+即時儀表板、多人協作時的狀態同步。
+
+這一步用 `Channel<T>` 實作一個簡易的 pub/sub 廣播中心 `BroadcastHub`，
+是這門課裡第一次出現「一個事件、多個接收者」的架構。
+
+## 為什麼用 `Channel<T>`，而不是 Step 3 的輪詢？
+
+Step 3 的每個連線各自去讀共用的 `CounterFeed` 歷史紀錄，客戶端一多，
+就變成大家都在重複檢查同一份資料。這一步改成：
+
+- 每個連線訂閱時，拿到**屬於自己的一個 `Channel<BroadcastMessage>`**。
+- `PublishAsync` 被呼叫時（例如有人送出聊天訊息），把同一則訊息**分別寫入
+  每一個訂閱者的 channel**。
+- 每個連線的迴圈只需要 `await foreach` 讀自己的 channel，有新訊息就送出、
+  沒有就一直等待（不會忙碌迴圈耗 CPU），彼此完全獨立。
+
+```csharp
+var channel = Channel.CreateBounded<BroadcastMessage>(new BoundedChannelOptions(20)
+{
+    FullMode = BoundedChannelFullMode.DropOldest,
+    SingleReader = true,
+    SingleWriter = false,
+});
 ```
-backend/
-  Program.cs        後端進入點，所有 API 都寫在這裡（教學用途，刻意不拆檔案）
-  wwwroot/           前端靜態檔案（index.html + app.js），由後端直接託管
+
+- 用**有界（bounded）** channel 而不是無限累積，是為了避免「某個客戶端網路
+  很差、消化訊息很慢」時，訊息在伺服器記憶體裡無限堆積。
+- `DropOldest`：滿了就丟掉最舊的，寧可讓慢的客戶端漏掉幾則訊息，
+  也不要讓它拖慢或塞爆整個伺服器。
+
+## 後端關鍵程式碼（`backend/Program.cs`）
+
+訂閱、讀取、離線清理：
+
+```csharp
+var (clientId, reader) = hub.Subscribe();
+try
+{
+    await foreach (var message in reader.ReadAllAsync(cancellationToken))
+    {
+        await WriteSseMessageAsync(context.Response, cancellationToken,
+            id: message.Id.ToString(), eventName: message.EventName, data: message.Data);
+    }
+}
+finally
+{
+    hub.Unsubscribe(clientId); // 斷線時務必清理，否則會累積用不到的 channel（記憶體洩漏）
+}
 ```
 
-後端與前端同一個專案託管（`app.UseStaticFiles()` + `app.UseDefaultFiles()`），
-避免額外處理 CORS，讓你可以專心在 SSE 機制上。
+觸發廣播的 API：
 
-## 如何使用這個課程
+```csharp
+app.MapPost("/sse/chat/messages", async (ChatMessageRequest request, BroadcastHub hub) =>
+{
+    await hub.PublishAsync("chat", request.Text.Trim());
+    return Results.Accepted();
+});
+```
 
-每個步驟都是一個獨立的 git branch，後一個步驟會在前一個步驟的程式碼基礎上疊加。
+- `EventSource` 只能用 GET 接收，**不能主動送資料**。所以「送出訊息」這件事
+  要另外開一個普通的 POST API，伺服器收到後再透過 `BroadcastHub` 廣播出去。
+- 每次有人連線／離線，也會呼叫 `hub.PublishPresenceAsync()` 廣播目前在線
+  人數，示範「觸發廣播」不是只能靠計時器，任何伺服器端事件都可以是廣播的來源。
+
+## 前端關鍵程式碼（`backend/wwwroot/app.js`）
+
+```javascript
+await fetch("/sse/chat/messages", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ text }),
+});
+```
+
+送出訊息用一般的 `fetch`，跟接收訊息的 `EventSource` 是兩條分開的路徑——
+這是 SSE 的固有限制，也是為什麼 SSE 適合「單向、伺服器主導」的推播場景，
+真正需要雙向溝通時通常會考慮 WebSocket。
+
+## 動手試試看
 
 ```bash
-git checkout step-1-basic-sse
+git checkout step-4-broadcast
 cd backend
 dotnet run
-# 開瀏覽器到 http://localhost:5080
 ```
 
-想看某一步驟「新增了什麼」，可以直接 diff 相鄰兩個 branch：
+打開**兩個瀏覽器分頁**都連到 `http://localhost:5080`：
+
+1. 在其中一個分頁輸入文字送出，應該兩個分頁都會立刻收到同一則訊息。
+2. 觀察在線人數：多開一個分頁、或關閉一個分頁，其他分頁的在線人數會即時更新。
+3. 也可以直接用 curl 觸發廣播，同時開著瀏覽器分頁看效果：
+   ```bash
+   curl -X POST http://localhost:5080/sse/chat/messages \
+     -H "Content-Type: application/json" \
+     -d '{"text":"來自 curl 的廣播訊息"}'
+   ```
+
+## 下一步
+
+Step 5 會補上兩個正式環境必備的機制：**心跳（heartbeat）**避免連線被反向
+代理逾時判定為閒置而關閉，以及更完整地確保連線在各種斷線情境下都能正確
+清理資源。
 
 ```bash
-git diff step-1-basic-sse step-2-event-format
+git checkout step-5-heartbeat-cleanup
 ```
-
-## 課程大綱
-
-| Branch | 主題 | 學習重點 |
-|---|---|---|
-| `step-1-basic-sse` | 最基本的 SSE 推播 | `text/event-stream`、手動寫入 Response、`EventSource` 基本用法 |
-| `step-2-event-format` | SSE 協定格式 | `event:`、`id:`、多行 `data:`、`retry:`、具名事件監聽 |
-| `step-3-reconnect` | 自動重連與 Last-Event-ID | 斷線自動重連、`Last-Event-ID` header、補送遺漏訊息 |
-| `step-4-broadcast` | 多客戶端廣播 | `Channel<T>`、連線管理、一對多推播（多分頁同步收到訊息） |
-| `step-5-heartbeat-cleanup` | 心跳與資源清理 | Keep-alive 心跳、偵測斷線、`CancellationToken` 清理連線資源 |
-
-每個 branch 的根目錄都有一份 `STEP.md`，說明：
-- 這一步要學什麼、為什麼重要
-- 程式碼的關鍵改動與講解
-- 怎麼動手測試（含瀏覽器操作步驟）
-
-## 先備知識
-
-- 熟悉 C# 與基本 ASP.NET Core（Minimal API）語法
-- 熟悉 HTML/JavaScript 基礎（不需要框架經驗）
-- 了解 HTTP 的基本觀念（header、streaming response）
-
-## 環境需求
-
-- .NET 9 SDK
-- 任一現代瀏覽器（Chrome/Edge/Firefox 皆支援 `EventSource`）
