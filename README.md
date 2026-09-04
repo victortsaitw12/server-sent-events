@@ -36,13 +36,13 @@ git diff step-1-basic-sse step-2-event-format
 
 | Branch | 主題 | 學習重點 |
 |---|---|---|
-| `step-1-basic-sse` | 最基本的 SSE 推播 | `text/event-stream`、手動寫入 Response、`EventSource` 基本用法 |
-| `step-2-event-format` | SSE 協定格式 | `event:`、`id:`、多行 `data:`、`retry:`、具名事件監聽 |
-| `step-3-reconnect` | 自動重連與 Last-Event-ID | 斷線自動重連、`Last-Event-ID` header、補送遺漏訊息 |
-| `step-4-broadcast` | 多客戶端廣播 | `Channel<T>`、連線管理、一對多推播（多分頁同步收到訊息） |
-| `step-5-heartbeat-cleanup` | 心跳與資源清理 | Keep-alive 心跳、偵測斷線、`CancellationToken` 清理連線資源 |
+| [`step-1-basic-sse`](https://github.com/victortsaitw12/server-sent-events/tree/step-1-basic-sse) | 最基本的 SSE 推播 | `text/event-stream`、手動寫入 Response、`EventSource` 基本用法 |
+| [`step-2-event-format`](https://github.com/victortsaitw12/server-sent-events/tree/step-2-event-format) | SSE 協定格式 | `event:`、`id:`、多行 `data:`、`retry:`、具名事件監聽 |
+| [`step-3-reconnect`](https://github.com/victortsaitw12/server-sent-events/tree/step-3-reconnect) | 自動重連與 Last-Event-ID | 斷線自動重連、`Last-Event-ID` header、補送遺漏訊息 |
+| [`step-4-broadcast`](https://github.com/victortsaitw12/server-sent-events/tree/step-4-broadcast) | 多客戶端廣播 | `Channel<T>`、連線管理、一對多推播（多分頁同步收到訊息） |
+| [`step-5-heartbeat-cleanup`](https://github.com/victortsaitw12/server-sent-events/tree/step-5-heartbeat-cleanup) | 心跳與資源清理 | Keep-alive 心跳、偵測斷線、`CancellationToken` 清理連線資源 |
 
-每個 branch 的根目錄都有一份 `STEP.md`，說明：
+每個 branch 的 `README.md`（切換 branch 後 GitHub 會自動顯示）都說明了：
 - 這一步要學什麼、為什麼重要
 - 程式碼的關鍵改動與講解
 - 怎麼動手測試（含瀏覽器操作步驟）
