@@ -2,17 +2,23 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
-  <title>SSE 課程 - Step 1：最基本的推播</title>
+  <title>SSE 課程 - Step 2：事件格式</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>Step 1：最基本的 SSE 推播</h1>
-  <p>後端每秒推送一次伺服器時間，前端用瀏覽器內建的 <code>EventSource</code> 接收。</p>
+  <h1>Step 2：SSE 事件格式</h1>
+  <p>
+    後端每秒送出一則具名的 <code>tick</code> 事件，每 5 次額外送出一則多行內容的
+    <code>alert</code> 事件。每則訊息都帶有遞增的 <code>id</code>。
+  </p>
 
   <p>連線狀態：<span id="status">尚未連線</span></p>
 
-  <h2>收到的訊息</h2>
-  <ul id="messages"></ul>
+  <h2>tick 事件</h2>
+  <ul id="ticks"></ul>
+
+  <h2>alert 事件（多行內容）</h2>
+  <ul id="alerts"></ul>
 
   <script src="app.js"></script>
 </body>

@@ -1,53 +1,64 @@
-# Step 1：最基本的 SSE 推播
+# Step 2：SSE 事件格式
 
 ## 這一步要學什麼
 
-Server-Sent Events 的本質其實很單純：**伺服器把 HTTP response 的 Content-Type
-設成 `text/event-stream`，然後持續不斷地寫入資料、不關閉連線**。瀏覽器看到這個
-Content-Type，就知道要用串流的方式讀取，而不是等整個 response 結束才處理。
+Step 1 只用了 SSE 最簡單的 `data:` 欄位。實際上 SSE 訊息還有另外三個常用欄位：
 
-這一步刻意不用任何框架包裝，直接手動組出最陽春的 SSE response，讓你看清楚
-它底層到底在做什麼。
+- `event:` — 為這則訊息命名，前端可以用 `addEventListener("名稱", ...)` 分別處理
+  不同種類的訊息，而不是全部擠在 `onmessage` 裡判斷。
+- `id:` — 為這則訊息編號，瀏覽器會記住「目前收到的最後一個 id」，斷線重連時
+  會透過 `Last-Event-ID` header 告訴伺服器（下一步 Step 3 會用到這個機制）。
+- `retry:` — 告訴瀏覽器斷線後要等多久再自動重連（單位毫秒），只需要送一次。
+
+以及 `data:` 其實可以**重複多次**組成多行內容——這是很多人會誤解的地方。
+
+## SSE 訊息的完整格式
+
+一則完整的 SSE 訊息長這樣（欄位間用 `\n`，訊息結尾用「空白行」`\n\n` 結束）：
+
+```
+id: 5
+event: alert
+data: 已送出 5 則 tick 訊息
+data: 伺服器時間：14:32:10
+
+```
+
+瀏覽器收到後，會把兩個 `data:` 行用 `\n` 接回一個字串：
+`"已送出 5 則 tick 訊息\n伺服器時間：14:32:10"`。
 
 ## 後端關鍵程式碼（`backend/Program.cs`）
 
-```csharp
-context.Response.Headers.ContentType = "text/event-stream";
-context.Response.Headers.CacheControl = "no-cache";
-```
-
-- `text/event-stream` 是 SSE 的標準 MIME type，瀏覽器靠它判斷要用 `EventSource`
-  的串流解析邏輯。
-- `Cache-Control: no-cache` 避免中間的 proxy/瀏覽器快取這個一直在變動的串流。
+`WriteSseMessageAsync` 這個 helper 把「組欄位」這件事抽出來，逐行組出正確格式：
 
 ```csharp
-await context.Response.WriteAsync(message, cancellationToken);
-await context.Response.Body.FlushAsync(cancellationToken);
+if (data is not null)
+{
+    foreach (var line in data.Split('\n'))
+    {
+        builder.Append("data: ").Append(line).Append('\n');
+    }
+}
+builder.Append('\n'); // 空白行 = 這則訊息結束
 ```
 
-- SSE 訊息最簡單的格式是 `data: <內容>\n\n`（**注意結尾一定要兩個換行**，這是
-  一則訊息的結束標記）。
-- ASP.NET Core 預設會緩衝 response，如果不手動 `FlushAsync`，資料會卡在伺服器
-  端的緩衝區，瀏覽器完全收不到東西，直到 response 結束。
+`retry:` 只在連線一開始送一次：
 
 ```csharp
-var cancellationToken = context.RequestAborted;
+await WriteSseMessageAsync(context.Response, cancellationToken, retryMs: 3000);
 ```
-
-- `HttpContext.RequestAborted` 會在使用者關閉分頁、瀏覽器主動斷線時被觸發，
-  是我們判斷「該停止這個迴圈了」的依據。這一步先簡單處理，後面 Step 5 會更完整
-  地講連線清理。
 
 ## 前端關鍵程式碼（`backend/wwwroot/app.js`）
 
 ```javascript
-const source = new EventSource("/sse/time");
-source.onmessage = (event) => { ... };
+source.addEventListener("tick", (event) => {
+  console.log(event.lastEventId, event.data);
+});
 ```
 
-- `EventSource` 是瀏覽器原生 API，不需要安裝任何套件。
-- 它只能發 **GET** 請求（這是後面 Step 3 要處理「認證」時會遇到的限制之一）。
-- 沒有指定事件名稱的訊息（也就是純 `data: ...`）會觸發 `onmessage`。
+- 沒有用 `addEventListener("tick", ...)` 訂閱的話，`tick` 事件不會觸發
+  `onmessage`——具名事件必須明確訂閱才會收到。
+- `event.lastEventId` 就是後端送的 `id:`。
 
 ## 動手試試看
 
@@ -56,19 +67,15 @@ cd backend
 dotnet run
 ```
 
-開瀏覽器到 `http://localhost:5080`，應該會看到每秒新增一行目前時間。
+用 curl 直接看原始的位元組流，觀察 `id:` / `event:` / 多行 `data:` 的排列：
 
-再試著：
+```bash
+curl -N http://localhost:5080/sse/notifications
+```
 
-1. 打開瀏覽器開發者工具的 **Network** 面板，點選 `/sse/time` 這個請求，
-   觀察它的 Response 頁籤——你會看到資料是「持續增加」的，而不是一次性回來。
-2. 直接用 curl 觀察最原始的資料格式：
-   ```bash
-   curl -N http://localhost:5080/sse/time
-   ```
-   `-N` 會關閉 curl 的緩衝，讓你即時看到每一則 `data: ...` 訊息。
+打開瀏覽器到 `http://localhost:5080`，觀察 tick 跟 alert 兩個區塊分別更新。
 
 ## 下一步
 
-Step 2 會加上具名事件（`event:`）、多行資料、`id:` 與 `retry:`，讓你完整認識
-SSE 訊息的協定格式。
+Step 3 會用到這一步的 `id:` 機制：模擬斷線後，示範瀏覽器怎麼透過
+`Last-Event-ID` header 讓伺服器知道要從哪裡「補送」遺漏的訊息。
