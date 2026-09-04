@@ -26,6 +26,12 @@ source.addEventListener("chat", (event) => {
   messagesEl.prepend(li);
 });
 
+// 伺服器準備關閉前主動廣播的訊息，讓使用者清楚知道「這是預期中的斷線」，
+// 而不是把它當成一個看不出原因的錯誤。
+source.addEventListener("server-shutdown", (event) => {
+  statusEl.textContent = `⚠ ${event.data}`;
+});
+
 async function sendMessage() {
   const text = textEl.value.trim();
   if (!text) {

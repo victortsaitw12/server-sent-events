@@ -2,15 +2,15 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
-  <title>SSE 課程 - Step 4：多客戶端廣播</title>
+  <title>SSE 課程 - Step 5：心跳與斷線清理</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>Step 4：多客戶端廣播</h1>
+  <h1>Step 5：心跳與斷線清理</h1>
   <p>
-    打開<strong>兩個以上的瀏覽器分頁</strong>連到這個頁面，在任何一個分頁送出訊息，
-    所有分頁都會「同時」收到——這就是 SSE 用來做一對多推播（例如聊天室通知、
-    儀表板即時更新）的典型場景。
+    延續 Step 4 的多人聊天室，這一步加上每 15 秒一次的心跳（維持連線不被反向代理
+    當成閒置關閉）與更完整的斷線清理。心跳本身在畫面上看不到——用瀏覽器開發者工具
+    的 Network 面板，或下方「動手試試看」的 curl 指令觀察最原始的資料流才看得到。
   </p>
 
   <p>連線狀態：<span id="status">尚未連線</span>　目前在線：<span id="online">-</span> 人</p>
