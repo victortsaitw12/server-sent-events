@@ -1,37 +1,51 @@
 const statusEl = document.getElementById("status");
-const ticksEl = document.getElementById("ticks");
-const replaysEl = document.getElementById("replays");
+const onlineEl = document.getElementById("online");
+const messagesEl = document.getElementById("messages");
+const textEl = document.getElementById("text");
+const sendEl = document.getElementById("send");
 
-const source = new EventSource("/sse/counter");
+const source = new EventSource("/sse/chat");
 
 source.onopen = () => {
   statusEl.textContent = "已連線";
 };
 
-// 斷線瞬間會先觸發 onerror，接著瀏覽器才會依照 retry 設定自動重連——
-// 這整個過程完全不需要我們自己寫任何重連邏輯。
 source.onerror = () => {
   statusEl.textContent = "連線中斷，等待自動重連...";
 };
 
-source.addEventListener("resume-info", (event) => {
+// presence 事件由「有人連進來 / 離開」觸發，不是定時輪詢——
+// 每個分頁的連線與離線，都會讓其他所有分頁的在線人數即時更新。
+source.addEventListener("presence", (event) => {
+  onlineEl.textContent = event.data;
+});
+
+source.addEventListener("chat", (event) => {
   const li = document.createElement("li");
   li.textContent = event.data;
-  li.style.fontWeight = "bold";
-  replaysEl.prepend(li);
+  messagesEl.prepend(li);
 });
 
-// 重連後補送的訊息，用 replay 事件名稱跟正常的即時 tick 區分開來，
-// 讓你可以清楚看到「哪些是補送的」。
-source.addEventListener("replay", (event) => {
-  const li = document.createElement("li");
-  li.textContent = `#${event.lastEventId} - ${event.data}（補送）`;
-  li.classList.add("replay");
-  replaysEl.prepend(li);
-});
+async function sendMessage() {
+  const text = textEl.value.trim();
+  if (!text) {
+    return;
+  }
 
-source.addEventListener("tick", (event) => {
-  const li = document.createElement("li");
-  li.textContent = `#${event.lastEventId} - ${event.data}`;
-  ticksEl.prepend(li);
+  // 送出訊息是普通的 POST（EventSource 只能收，不能送），
+  // 後端收到後會透過 BroadcastHub 廣播給所有正在連線的分頁，包含自己這一個。
+  await fetch("/sse/chat/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+
+  textEl.value = "";
+}
+
+sendEl.addEventListener("click", sendMessage);
+textEl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    sendMessage();
+  }
 });

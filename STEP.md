@@ -1,73 +1,87 @@
-# Step 3：自動重連與 Last-Event-ID
+# Step 4：多客戶端廣播（一對多推播）
 
 ## 這一步要學什麼
 
-SSE 最強大的地方之一，是**瀏覽器內建自動重連機制**，而且重連時會自動帶上
-`Last-Event-ID` header，讓伺服器有機會「補送」客戶端錯過的訊息。這一步會
-讓你實際觀察到這整個流程，而不是只看文件描述。
+前三步的 endpoint 都只服務「一個」連線。SSE 真正常見的應用場景，是伺服器
+主動把同一則訊息**同時推送給所有正在連線的客戶端**——例如系統公告、
+即時儀表板、多人協作時的狀態同步。
 
-## 教學用的設計：故意斷線
+這一步用 `Channel<T>` 實作一個簡易的 pub/sub 廣播中心 `BroadcastHub`，
+是這門課裡第一次出現「一個事件、多個接收者」的架構。
 
-正式環境的伺服器不會沒事就把連線關掉，但為了讓你不用手動操作（例如拔網路線）
-就能看到重連效果，這一步的 `/sse/counter` endpoint **故意每送出 8 則訊息就
-主動關閉一次連線**（見 `Program.cs` 裡的 `ticksOnThisConnection >= 8`）。
+## 為什麼用 `Channel<T>`，而不是 Step 3 的輪詢？
 
-搭配這件事的是 `CounterFeed`（一個 `BackgroundService`）：它背景持續每秒把
-計數器加一，**跟任何一個 HTTP 連線的生命週期完全無關**。這很重要——如果計數
-只在連線內產生，斷線期間就不會有「被錯過的訊息」可以補送，這個示範就沒意義了。
+Step 3 的每個連線各自去讀共用的 `CounterFeed` 歷史紀錄，客戶端一多，
+就變成大家都在重複檢查同一份資料。這一步改成：
+
+- 每個連線訂閱時，拿到**屬於自己的一個 `Channel<BroadcastMessage>`**。
+- `PublishAsync` 被呼叫時（例如有人送出聊天訊息），把同一則訊息**分別寫入
+  每一個訂閱者的 channel**。
+- 每個連線的迴圈只需要 `await foreach` 讀自己的 channel，有新訊息就送出、
+  沒有就一直等待（不會忙碌迴圈耗 CPU），彼此完全獨立。
+
+```csharp
+var channel = Channel.CreateBounded<BroadcastMessage>(new BoundedChannelOptions(20)
+{
+    FullMode = BoundedChannelFullMode.DropOldest,
+    SingleReader = true,
+    SingleWriter = false,
+});
+```
+
+- 用**有界（bounded）** channel 而不是無限累積，是為了避免「某個客戶端網路
+  很差、消化訊息很慢」時，訊息在伺服器記憶體裡無限堆積。
+- `DropOldest`：滿了就丟掉最舊的，寧可讓慢的客戶端漏掉幾則訊息，
+  也不要讓它拖慢或塞爆整個伺服器。
 
 ## 後端關鍵程式碼（`backend/Program.cs`）
 
-判斷這是不是一個「重連」的請求：
+訂閱、讀取、離線清理：
 
 ```csharp
-if (context.Request.Headers.TryGetValue("Last-Event-ID", out var header) &&
-    long.TryParse(header, out var lastEventId))
+var (clientId, reader) = hub.Subscribe();
+try
 {
-    var missed = feed.GetMessagesAfter(lastEventId);
-    // ...補送 missed 裡的每一則訊息
-}
-```
-
-- `Last-Event-ID` 是瀏覽器自動加上的 header，值是它最後一次成功收到的 `id:`。
-- 這一步用 `event: replay` 跟平常的 `event: tick` 區分「補送的舊訊息」跟
-  「即時的新訊息」，方便你在畫面上一眼看出差異。
-
-`CounterFeed` 用一個有上限的 List 當作簡易的歷史紀錄（ring buffer）：
-
-```csharp
-protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-{
-    while (!stoppingToken.IsCancellationRequested)
+    await foreach (var message in reader.ReadAllAsync(cancellationToken))
     {
-        await Task.Delay(1000, stoppingToken);
-        lock (_lock)
-        {
-            _currentId++;
-            _buffer.Add((_currentId, DateTime.Now.ToString("HH:mm:ss")));
-            if (_buffer.Count > MaxBufferSize) _buffer.RemoveAt(0);
-        }
+        await WriteSseMessageAsync(context.Response, cancellationToken,
+            id: message.Id.ToString(), eventName: message.EventName, data: message.Data);
     }
 }
+finally
+{
+    hub.Unsubscribe(clientId); // 斷線時務必清理，否則會累積用不到的 channel（記憶體洩漏）
+}
 ```
 
-> 注意：這裡的歷史紀錄存在記憶體裡，伺服器重啟就會消失，且多台伺服器實例
-> 之間不會同步。真實專案如果需要更可靠的補送機制，會需要 Redis Stream、
-> 訊息佇列等外部儲存，這超出這門課的範圍，但你可以帶著這個問題繼續深入。
+觸發廣播的 API：
+
+```csharp
+app.MapPost("/sse/chat/messages", async (ChatMessageRequest request, BroadcastHub hub) =>
+{
+    await hub.PublishAsync("chat", request.Text.Trim());
+    return Results.Accepted();
+});
+```
+
+- `EventSource` 只能用 GET 接收，**不能主動送資料**。所以「送出訊息」這件事
+  要另外開一個普通的 POST API，伺服器收到後再透過 `BroadcastHub` 廣播出去。
+- 每次有人連線／離線，也會呼叫 `hub.PublishPresenceAsync()` 廣播目前在線
+  人數，示範「觸發廣播」不是只能靠計時器，任何伺服器端事件都可以是廣播的來源。
 
 ## 前端關鍵程式碼（`backend/wwwroot/app.js`）
 
-前端完全不用寫任何重連或補送邏輯——`Last-Event-ID` 的追蹤跟重送，
-都是 `EventSource` 自動處理的：
-
 ```javascript
-source.onerror = () => {
-  statusEl.textContent = "連線中斷，等待自動重連...";
-};
-
-source.addEventListener("replay", (event) => { ... });
-source.addEventListener("tick", (event) => { ... });
+await fetch("/sse/chat/messages", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ text }),
+});
 ```
+
+送出訊息用一般的 `fetch`，跟接收訊息的 `EventSource` 是兩條分開的路徑——
+這是 SSE 的固有限制，也是為什麼 SSE 適合「單向、伺服器主導」的推播場景，
+真正需要雙向溝通時通常會考慮 WebSocket。
 
 ## 動手試試看
 
@@ -76,23 +90,19 @@ cd backend
 dotnet run
 ```
 
-開瀏覽器到 `http://localhost:5080`，觀察：
+打開**兩個瀏覽器分頁**都連到 `http://localhost:5080`：
 
-1. 每 8 秒左右畫面會停頓一下（連線被伺服器主動關閉），接著自動恢復，
-   並且「重連補送訊息」區塊會出現一則 `resume-info` 說明。
-2. 打開 Network 面板觀察 `/sse/counter`，會看到它每隔一段時間就重新發送一次
-   請求——這就是自動重連，且每次都帶著 `Last-Event-ID` header。
-
-也可以用 curl 手動模擬「帶著舊的 Last-Event-ID 連線」：
-
-```bash
-# 先啟動伺服器一段時間讓計數器往上跑，再帶著較小的 id 連線，
-# 應該會立刻看到一連串 event: replay 被補送回來。
-curl -N -H "Last-Event-ID: 3" http://localhost:5080/sse/counter
-```
+1. 在其中一個分頁輸入文字送出，應該兩個分頁都會立刻收到同一則訊息。
+2. 觀察在線人數：多開一個分頁、或關閉一個分頁，其他分頁的在線人數會即時更新。
+3. 也可以直接用 curl 觸發廣播，同時開著瀏覽器分頁看效果：
+   ```bash
+   curl -X POST http://localhost:5080/sse/chat/messages \
+     -H "Content-Type: application/json" \
+     -d '{"text":"來自 curl 的廣播訊息"}'
+   ```
 
 ## 下一步
 
-Step 4 會處理「多個客戶端同時連線」的情境：目前這個做法是每個連線各自輪詢
-`CounterFeed`，客戶端一多效能就會變差。下一步會改用 `Channel<T>` 做真正的
-一對多廣播（pub/sub）。
+Step 5 會補上兩個正式環境必備的機制：**心跳（heartbeat）**避免連線被反向
+代理逾時判定為閒置而關閉，以及更完整地確保連線在各種斷線情境下都能正確
+清理資源。

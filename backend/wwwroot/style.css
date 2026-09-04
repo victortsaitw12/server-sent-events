@@ -24,6 +24,25 @@ ul {
   font-weight: bold;
 }
 
+#online {
+  font-weight: bold;
+}
+
+.chat-input {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.chat-input input {
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+}
+
+.chat-input button {
+  padding: 0.4rem 1rem;
+}
+
 code {
   background: #eee;
   padding: 0.1rem 0.3rem;

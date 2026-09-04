@@ -2,24 +2,26 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
-  <title>SSE 課程 - Step 3：自動重連與 Last-Event-ID</title>
+  <title>SSE 課程 - Step 4：多客戶端廣播</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>Step 3：自動重連與 Last-Event-ID</h1>
+  <h1>Step 4：多客戶端廣播</h1>
   <p>
-    後端每秒把一個累加的計數器寫進歷史紀錄，並<strong>故意每 8 則訊息就主動斷線一次</strong>，
-    模擬真實世界中網路不穩或伺服器重啟的情況。觀察瀏覽器怎麼自動重連、
-    以及重連後怎麼透過 <code>Last-Event-ID</code> 補回被錯過的訊息。
+    打開<strong>兩個以上的瀏覽器分頁</strong>連到這個頁面，在任何一個分頁送出訊息，
+    所有分頁都會「同時」收到——這就是 SSE 用來做一對多推播（例如聊天室通知、
+    儀表板即時更新）的典型場景。
   </p>
 
-  <p>連線狀態：<span id="status">尚未連線</span></p>
+  <p>連線狀態：<span id="status">尚未連線</span>　目前在線：<span id="online">-</span> 人</p>
 
-  <h2>重連補送訊息（replay，橘色）</h2>
-  <ul id="replays"></ul>
+  <div class="chat-input">
+    <input id="text" type="text" placeholder="輸入訊息後按 Enter 或送出" />
+    <button id="send">送出</button>
+  </div>
 
-  <h2>即時訊息（tick，正常）</h2>
-  <ul id="ticks"></ul>
+  <h2>廣播訊息</h2>
+  <ul id="messages"></ul>
 
   <script src="app.js"></script>
 </body>

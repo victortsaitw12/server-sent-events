@@ -1,88 +1,62 @@
+using System.Collections.Concurrent;
 using System.Text;
+using System.Threading.Channels;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// CounterFeed 同時是背景服務（持續產生資料）也是可以被 endpoint 注入的服務
-// （查詢/補送歷史資料），所以用同一個 singleton instance 註冊兩次。
-builder.Services.AddSingleton<CounterFeed>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<CounterFeed>());
+builder.Services.AddSingleton<BroadcastHub>();
 
 var app = builder.Build();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-app.MapGet("/sse/counter", async (HttpContext context, CounterFeed feed) =>
+app.MapGet("/sse/chat", async (HttpContext context, BroadcastHub hub) =>
 {
     context.Response.Headers.ContentType = "text/event-stream";
     context.Response.Headers.CacheControl = "no-cache";
 
     var cancellationToken = context.RequestAborted;
 
-    // retry 設短一點（2 秒），這樣斷線後很快就能觀察到重連。
     await WriteSseMessageAsync(context.Response, cancellationToken, retryMs: 2000);
 
-    long lastSentId;
-
-    // 瀏覽器的 EventSource 斷線自動重連時，會自動帶上 Last-Event-ID header，
-    // 值就是它最後一次成功收到的 id。我們可以靠這個判斷要不要「補送」訊息。
-    if (context.Request.Headers.TryGetValue("Last-Event-ID", out var header) &&
-        long.TryParse(header, out var lastEventId))
-    {
-        var missed = feed.GetMessagesAfter(lastEventId);
-        Console.WriteLine($"[SSE] 重新連線，Last-Event-ID={lastEventId}，補送 {missed.Count} 則訊息");
-
-        await WriteSseMessageAsync(
-            context.Response, cancellationToken,
-            eventName: "resume-info",
-            data: $"偵測到重新連線，從 id {lastEventId} 之後補送 {missed.Count} 則訊息");
-
-        lastSentId = lastEventId;
-        foreach (var item in missed)
-        {
-            await WriteSseMessageAsync(
-                context.Response, cancellationToken,
-                id: item.Id.ToString(), eventName: "replay", data: item.Data);
-            lastSentId = item.Id;
-        }
-    }
-    else
-    {
-        Console.WriteLine("[SSE] 新的客戶端連線");
-        lastSentId = feed.CurrentId;
-    }
+    var (clientId, reader) = hub.Subscribe();
+    Console.WriteLine($"[SSE] {clientId} 加入，目前在線 {hub.SubscriberCount} 人");
+    await hub.PublishPresenceAsync();
 
     try
     {
-        var ticksOnThisConnection = 0;
-
-        while (!cancellationToken.IsCancellationRequested)
+        // ReadAllAsync 會一直等待這個客戶端專屬 channel 裡的新訊息，
+        // 有新訊息就寫回這個連線；不同客戶端各自讀自己的 channel，互不影響。
+        await foreach (var message in reader.ReadAllAsync(cancellationToken))
         {
-            await Task.Delay(300, cancellationToken);
-
-            foreach (var item in feed.GetMessagesAfter(lastSentId))
-            {
-                await WriteSseMessageAsync(
-                    context.Response, cancellationToken,
-                    id: item.Id.ToString(), eventName: "tick", data: item.Data);
-                lastSentId = item.Id;
-                ticksOnThisConnection++;
-            }
-
-            // 教學用：故意每送出 8 則訊息就主動斷線一次，讓你不用手動操作
-            // 就能看到瀏覽器自動重連、並透過 Last-Event-ID 補送遺漏訊息的效果。
-            // 正式環境「不會」也「不應該」故意這樣斷線。
-            if (ticksOnThisConnection >= 8)
-            {
-                Console.WriteLine("[SSE] 故意中斷連線，模擬網路不穩 / 伺服器重啟");
-                return;
-            }
+            await WriteSseMessageAsync(
+                context.Response, cancellationToken,
+                id: message.Id.ToString(), eventName: message.EventName, data: message.Data);
         }
     }
     catch (OperationCanceledException)
     {
         // 使用者關閉分頁或斷線，屬於正常結束。
     }
+    finally
+    {
+        hub.Unsubscribe(clientId);
+        Console.WriteLine($"[SSE] {clientId} 離開，目前在線 {hub.SubscriberCount} 人");
+        await hub.PublishPresenceAsync();
+    }
+});
+
+app.MapPost("/sse/chat/messages", async (ChatMessageRequest request, BroadcastHub hub) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Text))
+    {
+        return Results.BadRequest();
+    }
+
+    // 這一個 API 呼叫，會讓所有正在連線的瀏覽器分頁「同時」收到這則訊息。
+    await hub.PublishAsync("chat", request.Text.Trim());
+    return Results.Accepted();
 });
 
 app.Run();
@@ -126,46 +100,54 @@ static async Task WriteSseMessageAsync(
     await response.Body.FlushAsync(cancellationToken);
 }
 
-// 背景持續產生資料，跟任何一個 HTTP 連線的生命週期無關。
-// 這樣即使所有客戶端都斷線，計數還是會繼續累加，
-// 才能真實地示範「重連時已經有訊息被錯過」的情境。
-class CounterFeed : BackgroundService
+record ChatMessageRequest(string Text);
+
+record BroadcastMessage(long Id, string EventName, string Data);
+
+// 一對多廣播的核心：每個連線的客戶端各自擁有一個 Channel<T>，
+// Publish 時把同一則訊息「複製」進每一個 channel，
+// 每個連線的 while 迴圈只需要讀自己的 channel，彼此完全獨立、互不阻塞。
+class BroadcastHub
 {
-    private const int MaxBufferSize = 30;
+    private readonly ConcurrentDictionary<Guid, Channel<BroadcastMessage>> _subscribers = new();
+    private long _nextId;
 
-    private readonly object _lock = new();
-    private readonly List<(long Id, string Data)> _buffer = new();
-    private long _currentId;
+    public int SubscriberCount => _subscribers.Count;
 
-    public long CurrentId
+    public (Guid ClientId, ChannelReader<BroadcastMessage> Reader) Subscribe()
     {
-        get { lock (_lock) return _currentId; }
+        var clientId = Guid.NewGuid();
+
+        // 有界 channel + DropOldest：萬一某個客戶端消化訊息的速度太慢
+        // （例如網路很差），寧可讓它漏掉比較舊的訊息，也不要拖慢或塞爆整個伺服器。
+        var channel = Channel.CreateBounded<BroadcastMessage>(new BoundedChannelOptions(20)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false,
+        });
+
+        _subscribers[clientId] = channel;
+        return (clientId, channel.Reader);
     }
 
-    public List<(long Id, string Data)> GetMessagesAfter(long id)
+    public void Unsubscribe(Guid clientId)
     {
-        lock (_lock)
+        if (_subscribers.TryRemove(clientId, out var channel))
         {
-            return _buffer.Where(m => m.Id > id).ToList();
+            channel.Writer.TryComplete();
         }
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async Task PublishAsync(string eventName, string data)
     {
-        while (!stoppingToken.IsCancellationRequested)
+        var message = new BroadcastMessage(Interlocked.Increment(ref _nextId), eventName, data);
+
+        foreach (var channel in _subscribers.Values)
         {
-            await Task.Delay(1000, stoppingToken);
-
-            lock (_lock)
-            {
-                _currentId++;
-                _buffer.Add((_currentId, DateTime.Now.ToString("HH:mm:ss")));
-
-                if (_buffer.Count > MaxBufferSize)
-                {
-                    _buffer.RemoveAt(0);
-                }
-            }
+            await channel.Writer.WriteAsync(message);
         }
     }
+
+    public Task PublishPresenceAsync() => PublishAsync("presence", SubscriberCount.ToString());
 }
