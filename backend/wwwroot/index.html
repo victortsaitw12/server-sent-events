@@ -2,23 +2,24 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
-  <title>SSE 課程 - Step 2：事件格式</title>
+  <title>SSE 課程 - Step 3：自動重連與 Last-Event-ID</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>Step 2：SSE 事件格式</h1>
+  <h1>Step 3：自動重連與 Last-Event-ID</h1>
   <p>
-    後端每秒送出一則具名的 <code>tick</code> 事件，每 5 次額外送出一則多行內容的
-    <code>alert</code> 事件。每則訊息都帶有遞增的 <code>id</code>。
+    後端每秒把一個累加的計數器寫進歷史紀錄，並<strong>故意每 8 則訊息就主動斷線一次</strong>，
+    模擬真實世界中網路不穩或伺服器重啟的情況。觀察瀏覽器怎麼自動重連、
+    以及重連後怎麼透過 <code>Last-Event-ID</code> 補回被錯過的訊息。
   </p>
 
   <p>連線狀態：<span id="status">尚未連線</span></p>
 
-  <h2>tick 事件</h2>
-  <ul id="ticks"></ul>
+  <h2>重連補送訊息（replay，橘色）</h2>
+  <ul id="replays"></ul>
 
-  <h2>alert 事件（多行內容）</h2>
-  <ul id="alerts"></ul>
+  <h2>即時訊息（tick，正常）</h2>
+  <ul id="ticks"></ul>
 
   <script src="app.js"></script>
 </body>

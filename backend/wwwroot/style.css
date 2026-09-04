@@ -10,13 +10,18 @@ body {
   font-weight: bold;
 }
 
-#messages {
+ul {
   font-family: ui-monospace, Consolas, monospace;
   background: #f4f4f4;
   padding: 1rem 1.5rem;
   border-radius: 6px;
-  max-height: 300px;
+  max-height: 200px;
   overflow-y: auto;
+}
+
+.replay {
+  color: #c0632a;
+  font-weight: bold;
 }
 
 code {

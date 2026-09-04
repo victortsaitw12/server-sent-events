@@ -1,64 +1,73 @@
-# Step 2：SSE 事件格式
+# Step 3：自動重連與 Last-Event-ID
 
 ## 這一步要學什麼
 
-Step 1 只用了 SSE 最簡單的 `data:` 欄位。實際上 SSE 訊息還有另外三個常用欄位：
+SSE 最強大的地方之一，是**瀏覽器內建自動重連機制**，而且重連時會自動帶上
+`Last-Event-ID` header，讓伺服器有機會「補送」客戶端錯過的訊息。這一步會
+讓你實際觀察到這整個流程，而不是只看文件描述。
 
-- `event:` — 為這則訊息命名，前端可以用 `addEventListener("名稱", ...)` 分別處理
-  不同種類的訊息，而不是全部擠在 `onmessage` 裡判斷。
-- `id:` — 為這則訊息編號，瀏覽器會記住「目前收到的最後一個 id」，斷線重連時
-  會透過 `Last-Event-ID` header 告訴伺服器（下一步 Step 3 會用到這個機制）。
-- `retry:` — 告訴瀏覽器斷線後要等多久再自動重連（單位毫秒），只需要送一次。
+## 教學用的設計：故意斷線
 
-以及 `data:` 其實可以**重複多次**組成多行內容——這是很多人會誤解的地方。
+正式環境的伺服器不會沒事就把連線關掉，但為了讓你不用手動操作（例如拔網路線）
+就能看到重連效果，這一步的 `/sse/counter` endpoint **故意每送出 8 則訊息就
+主動關閉一次連線**（見 `Program.cs` 裡的 `ticksOnThisConnection >= 8`）。
 
-## SSE 訊息的完整格式
-
-一則完整的 SSE 訊息長這樣（欄位間用 `\n`，訊息結尾用「空白行」`\n\n` 結束）：
-
-```
-id: 5
-event: alert
-data: 已送出 5 則 tick 訊息
-data: 伺服器時間：14:32:10
-
-```
-
-瀏覽器收到後，會把兩個 `data:` 行用 `\n` 接回一個字串：
-`"已送出 5 則 tick 訊息\n伺服器時間：14:32:10"`。
+搭配這件事的是 `CounterFeed`（一個 `BackgroundService`）：它背景持續每秒把
+計數器加一，**跟任何一個 HTTP 連線的生命週期完全無關**。這很重要——如果計數
+只在連線內產生，斷線期間就不會有「被錯過的訊息」可以補送，這個示範就沒意義了。
 
 ## 後端關鍵程式碼（`backend/Program.cs`）
 
-`WriteSseMessageAsync` 這個 helper 把「組欄位」這件事抽出來，逐行組出正確格式：
+判斷這是不是一個「重連」的請求：
 
 ```csharp
-if (data is not null)
+if (context.Request.Headers.TryGetValue("Last-Event-ID", out var header) &&
+    long.TryParse(header, out var lastEventId))
 {
-    foreach (var line in data.Split('\n'))
+    var missed = feed.GetMessagesAfter(lastEventId);
+    // ...補送 missed 裡的每一則訊息
+}
+```
+
+- `Last-Event-ID` 是瀏覽器自動加上的 header，值是它最後一次成功收到的 `id:`。
+- 這一步用 `event: replay` 跟平常的 `event: tick` 區分「補送的舊訊息」跟
+  「即時的新訊息」，方便你在畫面上一眼看出差異。
+
+`CounterFeed` 用一個有上限的 List 當作簡易的歷史紀錄（ring buffer）：
+
+```csharp
+protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+{
+    while (!stoppingToken.IsCancellationRequested)
     {
-        builder.Append("data: ").Append(line).Append('\n');
+        await Task.Delay(1000, stoppingToken);
+        lock (_lock)
+        {
+            _currentId++;
+            _buffer.Add((_currentId, DateTime.Now.ToString("HH:mm:ss")));
+            if (_buffer.Count > MaxBufferSize) _buffer.RemoveAt(0);
+        }
     }
 }
-builder.Append('\n'); // 空白行 = 這則訊息結束
 ```
 
-`retry:` 只在連線一開始送一次：
-
-```csharp
-await WriteSseMessageAsync(context.Response, cancellationToken, retryMs: 3000);
-```
+> 注意：這裡的歷史紀錄存在記憶體裡，伺服器重啟就會消失，且多台伺服器實例
+> 之間不會同步。真實專案如果需要更可靠的補送機制，會需要 Redis Stream、
+> 訊息佇列等外部儲存，這超出這門課的範圍，但你可以帶著這個問題繼續深入。
 
 ## 前端關鍵程式碼（`backend/wwwroot/app.js`）
 
-```javascript
-source.addEventListener("tick", (event) => {
-  console.log(event.lastEventId, event.data);
-});
-```
+前端完全不用寫任何重連或補送邏輯——`Last-Event-ID` 的追蹤跟重送，
+都是 `EventSource` 自動處理的：
 
-- 沒有用 `addEventListener("tick", ...)` 訂閱的話，`tick` 事件不會觸發
-  `onmessage`——具名事件必須明確訂閱才會收到。
-- `event.lastEventId` 就是後端送的 `id:`。
+```javascript
+source.onerror = () => {
+  statusEl.textContent = "連線中斷，等待自動重連...";
+};
+
+source.addEventListener("replay", (event) => { ... });
+source.addEventListener("tick", (event) => { ... });
+```
 
 ## 動手試試看
 
@@ -67,15 +76,23 @@ cd backend
 dotnet run
 ```
 
-用 curl 直接看原始的位元組流，觀察 `id:` / `event:` / 多行 `data:` 的排列：
+開瀏覽器到 `http://localhost:5080`，觀察：
+
+1. 每 8 秒左右畫面會停頓一下（連線被伺服器主動關閉），接著自動恢復，
+   並且「重連補送訊息」區塊會出現一則 `resume-info` 說明。
+2. 打開 Network 面板觀察 `/sse/counter`，會看到它每隔一段時間就重新發送一次
+   請求——這就是自動重連，且每次都帶著 `Last-Event-ID` header。
+
+也可以用 curl 手動模擬「帶著舊的 Last-Event-ID 連線」：
 
 ```bash
-curl -N http://localhost:5080/sse/notifications
+# 先啟動伺服器一段時間讓計數器往上跑，再帶著較小的 id 連線，
+# 應該會立刻看到一連串 event: replay 被補送回來。
+curl -N -H "Last-Event-ID: 3" http://localhost:5080/sse/counter
 ```
-
-打開瀏覽器到 `http://localhost:5080`，觀察 tick 跟 alert 兩個區塊分別更新。
 
 ## 下一步
 
-Step 3 會用到這一步的 `id:` 機制：模擬斷線後，示範瀏覽器怎麼透過
-`Last-Event-ID` header 讓伺服器知道要從哪裡「補送」遺漏的訊息。
+Step 4 會處理「多個客戶端同時連線」的情境：目前這個做法是每個連線各自輪詢
+`CounterFeed`，客戶端一多效能就會變差。下一步會改用 `Channel<T>` 做真正的
+一對多廣播（pub/sub）。
