@@ -1,59 +1,82 @@
-# Server-Sent Events 課程（.NET 9 + 原生 JavaScript）
+# SSE 課程 - Step 1：最基本的 SSE 推播
 
-這是一個透過 Git branch 一步步學習 Server-Sent Events（SSE）的實作課程。
-後端使用 **.NET 9 Minimal API**，前端使用**原生 HTML/JavaScript（EventSource API）**，
-不依賴任何前端框架，讓你專注在 SSE 協定本身的機制。
+> 這是 [Server-Sent Events 課程](https://github.com/victortsaitw12/server-sent-events)（.NET 9 + 原生 JavaScript）的第 1 步，共 5 步。
+> 回到 [課程總覽](https://github.com/victortsaitw12/server-sent-events/blob/main/README.md) ・ 下一步：[`step-2-event-format`](https://github.com/victortsaitw12/server-sent-events/tree/step-2-event-format)
 
-## 專案結構
+## 這一步要學什麼
 
+Server-Sent Events 的本質其實很單純：**伺服器把 HTTP response 的 Content-Type
+設成 `text/event-stream`，然後持續不斷地寫入資料、不關閉連線**。瀏覽器看到這個
+Content-Type，就知道要用串流的方式讀取，而不是等整個 response 結束才處理。
+
+這一步刻意不用任何框架包裝，直接手動組出最陽春的 SSE response，讓你看清楚
+它底層到底在做什麼。
+
+## 後端關鍵程式碼（`backend/Program.cs`）
+
+```csharp
+context.Response.Headers.ContentType = "text/event-stream";
+context.Response.Headers.CacheControl = "no-cache";
 ```
-backend/
-  Program.cs        後端進入點，所有 API 都寫在這裡（教學用途，刻意不拆檔案）
-  wwwroot/           前端靜態檔案（index.html + app.js），由後端直接託管
+
+- `text/event-stream` 是 SSE 的標準 MIME type，瀏覽器靠它判斷要用 `EventSource`
+  的串流解析邏輯。
+- `Cache-Control: no-cache` 避免中間的 proxy/瀏覽器快取這個一直在變動的串流。
+
+```csharp
+await context.Response.WriteAsync(message, cancellationToken);
+await context.Response.Body.FlushAsync(cancellationToken);
 ```
 
-後端與前端同一個專案託管（`app.UseStaticFiles()` + `app.UseDefaultFiles()`），
-避免額外處理 CORS，讓你可以專心在 SSE 機制上。
+- SSE 訊息最簡單的格式是 `data: <內容>\n\n`（**注意結尾一定要兩個換行**，這是
+  一則訊息的結束標記）。
+- ASP.NET Core 預設會緩衝 response，如果不手動 `FlushAsync`，資料會卡在伺服器
+  端的緩衝區，瀏覽器完全收不到東西，直到 response 結束。
 
-## 如何使用這個課程
+```csharp
+var cancellationToken = context.RequestAborted;
+```
 
-每個步驟都是一個獨立的 git branch，後一個步驟會在前一個步驟的程式碼基礎上疊加。
+- `HttpContext.RequestAborted` 會在使用者關閉分頁、瀏覽器主動斷線時被觸發，
+  是我們判斷「該停止這個迴圈了」的依據。這一步先簡單處理，後面 Step 5 會更完整
+  地講連線清理。
+
+## 前端關鍵程式碼（`backend/wwwroot/app.js`）
+
+```javascript
+const source = new EventSource("/sse/time");
+source.onmessage = (event) => { ... };
+```
+
+- `EventSource` 是瀏覽器原生 API，不需要安裝任何套件。
+- 它只能發 **GET** 請求（這是後面 Step 3 要處理「認證」時會遇到的限制之一）。
+- 沒有指定事件名稱的訊息（也就是純 `data: ...`）會觸發 `onmessage`。
+
+## 動手試試看
 
 ```bash
 git checkout step-1-basic-sse
 cd backend
 dotnet run
-# 開瀏覽器到 http://localhost:5080
 ```
 
-想看某一步驟「新增了什麼」，可以直接 diff 相鄰兩個 branch：
+開瀏覽器到 `http://localhost:5080`，應該會看到每秒新增一行目前時間。
+
+再試著：
+
+1. 打開瀏覽器開發者工具的 **Network** 面板，點選 `/sse/time` 這個請求，
+   觀察它的 Response 頁籤——你會看到資料是「持續增加」的，而不是一次性回來。
+2. 直接用 curl 觀察最原始的資料格式：
+   ```bash
+   curl -N http://localhost:5080/sse/time
+   ```
+   `-N` 會關閉 curl 的緩衝，讓你即時看到每一則 `data: ...` 訊息。
+
+## 下一步
+
+Step 2 會加上具名事件（`event:`）、多行資料、`id:` 與 `retry:`，讓你完整認識
+SSE 訊息的協定格式。
 
 ```bash
-git diff step-1-basic-sse step-2-event-format
+git checkout step-2-event-format
 ```
-
-## 課程大綱
-
-| Branch | 主題 | 學習重點 |
-|---|---|---|
-| `step-1-basic-sse` | 最基本的 SSE 推播 | `text/event-stream`、手動寫入 Response、`EventSource` 基本用法 |
-| `step-2-event-format` | SSE 協定格式 | `event:`、`id:`、多行 `data:`、`retry:`、具名事件監聽 |
-| `step-3-reconnect` | 自動重連與 Last-Event-ID | 斷線自動重連、`Last-Event-ID` header、補送遺漏訊息 |
-| `step-4-broadcast` | 多客戶端廣播 | `Channel<T>`、連線管理、一對多推播（多分頁同步收到訊息） |
-| `step-5-heartbeat-cleanup` | 心跳與資源清理 | Keep-alive 心跳、偵測斷線、`CancellationToken` 清理連線資源 |
-
-每個 branch 的根目錄都有一份 `STEP.md`，說明：
-- 這一步要學什麼、為什麼重要
-- 程式碼的關鍵改動與講解
-- 怎麼動手測試（含瀏覽器操作步驟）
-
-## 先備知識
-
-- 熟悉 C# 與基本 ASP.NET Core（Minimal API）語法
-- 熟悉 HTML/JavaScript 基礎（不需要框架經驗）
-- 了解 HTTP 的基本觀念（header、streaming response）
-
-## 環境需求
-
-- .NET 9 SDK
-- 任一現代瀏覽器（Chrome/Edge/Firefox 皆支援 `EventSource`）
