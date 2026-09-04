@@ -1,0 +1,26 @@
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  max-width: 640px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+  line-height: 1.6;
+}
+
+#status {
+  font-weight: bold;
+}
+
+#messages {
+  font-family: ui-monospace, Consolas, monospace;
+  background: #f4f4f4;
+  padding: 1rem 1.5rem;
+  border-radius: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+code {
+  background: #eee;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+}

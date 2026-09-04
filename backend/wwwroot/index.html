@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>SSE 課程 - Step 1：最基本的推播</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <h1>Step 1：最基本的 SSE 推播</h1>
+  <p>後端每秒推送一次伺服器時間，前端用瀏覽器內建的 <code>EventSource</code> 接收。</p>
+
+  <p>連線狀態：<span id="status">尚未連線</span></p>
+
+  <h2>收到的訊息</h2>
+  <ul id="messages"></ul>
+
+  <script src="app.js"></script>
+</body>
+</html>
