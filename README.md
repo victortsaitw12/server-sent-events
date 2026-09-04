@@ -1,59 +1,89 @@
-# Server-Sent Events 課程（.NET 9 + 原生 JavaScript）
+# SSE 課程 - Step 2：SSE 事件格式
 
-這是一個透過 Git branch 一步步學習 Server-Sent Events（SSE）的實作課程。
-後端使用 **.NET 9 Minimal API**，前端使用**原生 HTML/JavaScript（EventSource API）**，
-不依賴任何前端框架，讓你專注在 SSE 協定本身的機制。
+> 這是 [Server-Sent Events 課程](https://github.com/victortsaitw12/server-sent-events)（.NET 9 + 原生 JavaScript）的第 2 步，共 5 步。
+> 回到 [課程總覽](https://github.com/victortsaitw12/server-sent-events/blob/main/README.md) ・ 上一步：[`step-1-basic-sse`](https://github.com/victortsaitw12/server-sent-events/tree/step-1-basic-sse) ・ 下一步：[`step-3-reconnect`](https://github.com/victortsaitw12/server-sent-events/tree/step-3-reconnect)
 
-## 專案結構
+## 這一步要學什麼
+
+Step 1 只用了 SSE 最簡單的 `data:` 欄位。實際上 SSE 訊息還有另外三個常用欄位：
+
+- `event:` — 為這則訊息命名，前端可以用 `addEventListener("名稱", ...)` 分別處理
+  不同種類的訊息，而不是全部擠在 `onmessage` 裡判斷。
+- `id:` — 為這則訊息編號，瀏覽器會記住「目前收到的最後一個 id」，斷線重連時
+  會透過 `Last-Event-ID` header 告訴伺服器（下一步 Step 3 會用到這個機制）。
+- `retry:` — 告訴瀏覽器斷線後要等多久再自動重連（單位毫秒），只需要送一次。
+
+以及 `data:` 其實可以**重複多次**組成多行內容——這是很多人會誤解的地方。
+
+## SSE 訊息的完整格式
+
+一則完整的 SSE 訊息長這樣（欄位間用 `\n`，訊息結尾用「空白行」`\n\n` 結束）：
 
 ```
-backend/
-  Program.cs        後端進入點，所有 API 都寫在這裡（教學用途，刻意不拆檔案）
-  wwwroot/           前端靜態檔案（index.html + app.js），由後端直接託管
+id: 5
+event: alert
+data: 已送出 5 則 tick 訊息
+data: 伺服器時間：14:32:10
+
 ```
 
-後端與前端同一個專案託管（`app.UseStaticFiles()` + `app.UseDefaultFiles()`），
-避免額外處理 CORS，讓你可以專心在 SSE 機制上。
+瀏覽器收到後，會把兩個 `data:` 行用 `\n` 接回一個字串：
+`"已送出 5 則 tick 訊息\n伺服器時間：14:32:10"`。
 
-## 如何使用這個課程
+## 後端關鍵程式碼（`backend/Program.cs`）
 
-每個步驟都是一個獨立的 git branch，後一個步驟會在前一個步驟的程式碼基礎上疊加。
+`WriteSseMessageAsync` 這個 helper 把「組欄位」這件事抽出來，逐行組出正確格式：
+
+```csharp
+if (data is not null)
+{
+    foreach (var line in data.Split('\n'))
+    {
+        builder.Append("data: ").Append(line).Append('\n');
+    }
+}
+builder.Append('\n'); // 空白行 = 這則訊息結束
+```
+
+`retry:` 只在連線一開始送一次：
+
+```csharp
+await WriteSseMessageAsync(context.Response, cancellationToken, retryMs: 3000);
+```
+
+## 前端關鍵程式碼（`backend/wwwroot/app.js`）
+
+```javascript
+source.addEventListener("tick", (event) => {
+  console.log(event.lastEventId, event.data);
+});
+```
+
+- 沒有用 `addEventListener("tick", ...)` 訂閱的話，`tick` 事件不會觸發
+  `onmessage`——具名事件必須明確訂閱才會收到。
+- `event.lastEventId` 就是後端送的 `id:`。
+
+## 動手試試看
 
 ```bash
-git checkout step-1-basic-sse
+git checkout step-2-event-format
 cd backend
 dotnet run
-# 開瀏覽器到 http://localhost:5080
 ```
 
-想看某一步驟「新增了什麼」，可以直接 diff 相鄰兩個 branch：
+用 curl 直接看原始的位元組流，觀察 `id:` / `event:` / 多行 `data:` 的排列：
 
 ```bash
-git diff step-1-basic-sse step-2-event-format
+curl -N http://localhost:5080/sse/notifications
 ```
 
-## 課程大綱
+打開瀏覽器到 `http://localhost:5080`，觀察 tick 跟 alert 兩個區塊分別更新。
 
-| Branch | 主題 | 學習重點 |
-|---|---|---|
-| `step-1-basic-sse` | 最基本的 SSE 推播 | `text/event-stream`、手動寫入 Response、`EventSource` 基本用法 |
-| `step-2-event-format` | SSE 協定格式 | `event:`、`id:`、多行 `data:`、`retry:`、具名事件監聽 |
-| `step-3-reconnect` | 自動重連與 Last-Event-ID | 斷線自動重連、`Last-Event-ID` header、補送遺漏訊息 |
-| `step-4-broadcast` | 多客戶端廣播 | `Channel<T>`、連線管理、一對多推播（多分頁同步收到訊息） |
-| `step-5-heartbeat-cleanup` | 心跳與資源清理 | Keep-alive 心跳、偵測斷線、`CancellationToken` 清理連線資源 |
+## 下一步
 
-每個 branch 的根目錄都有一份 `STEP.md`，說明：
-- 這一步要學什麼、為什麼重要
-- 程式碼的關鍵改動與講解
-- 怎麼動手測試（含瀏覽器操作步驟）
+Step 3 會用到這一步的 `id:` 機制：模擬斷線後，示範瀏覽器怎麼透過
+`Last-Event-ID` header 讓伺服器知道要從哪裡「補送」遺漏的訊息。
 
-## 先備知識
-
-- 熟悉 C# 與基本 ASP.NET Core（Minimal API）語法
-- 熟悉 HTML/JavaScript 基礎（不需要框架經驗）
-- 了解 HTTP 的基本觀念（header、streaming response）
-
-## 環境需求
-
-- .NET 9 SDK
-- 任一現代瀏覽器（Chrome/Edge/Firefox 皆支援 `EventSource`）
+```bash
+git checkout step-3-reconnect
+```
